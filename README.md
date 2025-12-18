@@ -16,5 +16,7 @@ Data Source: The dataset contains information regarding car attributes (brand, e
 
 Results & Methodology: We utilized a blending strategy of tree-based models. The final model weights used for the submission were. This approach allowed us to balance the variance and bias of the individual models to minimize the Mean Absolute Error (MAE).
 
-Here is the schema of our project: <img width="464" height="752" alt="image" src="https://github.com/user-attachments/assets/4e807e7d-8bd7-4a37-9138-6bc93a1afa30" />
+Here is the schema of our project: 
+
+<img width="464" height="752" alt="image" src="https://github.com/user-attachments/assets/4e807e7d-8bd7-4a37-9138-6bc93a1afa30" />
 
