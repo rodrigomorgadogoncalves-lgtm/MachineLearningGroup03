@@ -15,6 +15,8 @@ import time
 import heapq
 from math import ceil
 from itertools import combinations
+from copy import deepcopy
+
 
 # --- Core Scientific Stack ---
 import numpy as np
@@ -746,7 +748,6 @@ def fit_feat_engineering_rules(df_input: pd.DataFrame, min_group_n: int = 25) ->
     
     - Computes global statistics: max year, median MPG, median miles per year
     - Builds usage table for mileage normalization with fallback logic
-    - Calculates brand-level paint quality medians
     - Uses min_group_n threshold for reliable group statistics
     - Returns dictionary of rules for consistent feature engineering
     """
@@ -819,11 +820,6 @@ def fit_feat_engineering_rules(df_input: pd.DataFrame, min_group_n: int = 25) ->
     rules["usage_table"] = usage_table
     rules["global_miles_median"] = global_miles_median
 
-    # Compute brand-level paint quality medians
-    if "Brand" in df.columns and "paintQuality%" in df.columns:
-        rules["brand_paint_median"] = df.groupby("Brand")["paintQuality%"].median()
-    else:
-        rules["brand_paint_median"] = None
 
     return rules
 
@@ -836,10 +832,9 @@ def transform_add_all_features(df_input: pd.DataFrame, rules: dict) -> pd.DataFr
     
     - Creates car age and annual mileage features from year and mileage
     - Adds efficiency ratios combining engine size, MPG, and tax
-    - Calculates paint quality deviations from brand medians
     - Computes usage deviation from expected mileage patterns
     - Adds model popularity and specialization scores
-    - Generates neglect and condition metrics
+    - Generates usage metrics
     """
     df = df_input.copy()
 
@@ -848,9 +843,7 @@ def transform_add_all_features(df_input: pd.DataFrame, rules: dict) -> pd.DataFr
     min_group_n   = rules.get("min_group_n", 25)
     usage_table   = rules.get("usage_table", None)
     global_m_mpy  = rules.get("global_miles_median", None)
-    brand_paint_m = rules.get("brand_paint_median", None)
     model_pop     = rules.get("model_popularity", None)
-    last_year_bm  = rules.get("last_year_by_bm", None)
 
     # car_age 
     if max_year is not None and "year" in df.columns:
@@ -892,22 +885,6 @@ def transform_add_all_features(df_input: pd.DataFrame, rules: dict) -> pd.DataFr
         )
 
         df["is_high_efficiency"] = cond_eff.astype(int)
-
-    # condition_per_age 
-    if "paintQuality%" in df.columns and "car_age" in df.columns:
-        df["condition_per_age"] = df["paintQuality%"] / (df["car_age"] + 1)
-
-    # neglect_ratio 
-    if all(c in df.columns for c in ["mileage", "paintQuality%"]):
-        df["neglect_ratio"] = np.log1p(df["mileage"] / (df["paintQuality%"] + 1))
-
-    #  paint_quality_dev_brand 
-    if (brand_paint_m is not None and 
-        "Brand" in df.columns and 
-        "paintQuality%" in df.columns):
-        df["paint_quality_dev_brand"] = (
-            df["paintQuality%"] - df["Brand"].map(brand_paint_m)
-        )
 
     # usage_dev_vs_cohort 
     if (
@@ -1242,7 +1219,7 @@ def feat_selection(df_input, drop_cols=DROP_COLS):
 def fit_processing_rules_Lin(X_input):
     """
     Learns all statistical rules based ONLY on the training set.
-    Returns a 'rules' dictionary to be used later.
+    Returns a transformed dataset 'X_t' and a 'rules' dictionary to be used later.
     """
     X_t = X_input.copy()
     rules = {}
@@ -1280,6 +1257,11 @@ def fit_processing_rules_Lin(X_input):
 
 
 def transform_processing_rules_Lin(df_input, rules):
+    """
+    Applies all learned rules to a new dataset (validation or test).
+    If the dataset is the test set, it will have the "carID" column and will need basic cleaning first.
+    Returns the transformed DataFrame.
+    """
     df = df_input.copy()
     if "carID" in df.columns:
         df = clean_basic_data(df)
@@ -1676,14 +1658,14 @@ def evaluate_elasticnet(model, X_train_input, y_train_input, X_val_input, y_val_
 
 
 # -------------------------------------------------------
-# K-Nearest Neighbors 2
+# K-Nearest Neighbors → 2 functions
 # -------------------------------------------------------
 
 
 def fit_processing_rules_Knn(X_input):
     """
     Learns all statistical rules based ONLY on the training set.
-    Returns a 'rules' dictionary to be used later.
+    Returns a transformed dataset 'X_t' and a 'rules' dictionary to be used later.
     """
     X_t = X_input.copy()
     rules = {}
@@ -1714,12 +1696,15 @@ def fit_processing_rules_Knn(X_input):
     rules['encoder'] = fit_ohe(X_t)
     X_t = transform_ohe(X_t, rules['encoder'])      
 
-
-  
     return X_t, rules
 
 
 def transform_processing_rules_Knn(df_input, rules):
+    """
+    Applies all learned rules to a new dataset (validation or test).
+    If the dataset is the test set, it will have the "carID" column and will need basic cleaning first.
+    Returns the transformed DataFrame.
+    """
     df = df_input.copy()
     if "carID" in df.columns:
         df = clean_basic_data(df)
@@ -1733,7 +1718,7 @@ def transform_processing_rules_Knn(df_input, rules):
 
 
 # -------------------------------------------------------
-# Neural Networks 4
+# Neural Networks → 4 functions
 # -------------------------------------------------------
 
 
@@ -1858,7 +1843,7 @@ def show_results_nn(df, models_dict, X_t, y_t, X_v, y_v):
 
 
 # -------------------------------------------------------
-# Decision Trees 3 + 2 functions
+# Decision Trees → 3 functions + 2 functions (for feature selection)
 # -------------------------------------------------------
 
 
@@ -2041,125 +2026,9 @@ def objective_function_r2(w, *args):
 # Open Ended Section
 # ========================================================
 
-# -------------------------------------------------------
-# 5.1. Feature Importance across price levels → 3 functions
-# -------------------------------------------------------
-
-def importance_by_price_band(model, X, y, q=4, n_repeats=10, seed=42,
-                             scoring="neg_mean_absolute_error",
-                             normalize=True, min_bin_size=200):
-
-    # X -> DataFrame
-    if isinstance(X, pd.DataFrame):
-        X_df = X.copy()
-    else:
-        X_df = pd.DataFrame(X)
-        X_df.columns = [f"f{i}" for i in range(X_df.shape[1])]
-
-    y = np.asarray(y).ravel()
-    bands = pd.qcut(pd.Series(y), q=q, duplicates="drop")
-
-    # ordem crescente por limite inferior do intervalo
-    band_order = sorted(bands.cat.categories, key=lambda iv: float(iv.left))
-
-    out = []
-    for band in band_order:
-        idx = (bands == band).to_numpy()
-        n = int(idx.sum())
-        if n < min_bin_size:
-            continue
-
-        Xb = X_df.loc[idx]
-        yb = y[idx]
-
-        pi = permutation_importance(
-            model, Xb, yb,
-            scoring=scoring,
-            n_repeats=n_repeats,
-            random_state=seed,
-            n_jobs=-1
-        )
-
-        imp = np.maximum(pi.importances_mean.astype(float), 0.0)
-        if normalize:
-            s = imp.sum()
-            imp = imp / s if s > 0 else imp
-
-        for f, v in zip(X_df.columns, imp):
-            out.append({"band": str(band), "feature": f, "importance": float(v), "n": n})
-
-    if len(out) == 0:
-        df_long = pd.DataFrame(columns=["band", "feature", "importance", "n"])
-        df_wide = pd.DataFrame(index=X_df.columns)
-        return df_long, df_wide
-
-    df_long = pd.DataFrame(out)
-    df_wide = (df_long.pivot_table(index="feature", columns="band",
-                                   values="importance", aggfunc="mean")
-                      .fillna(0.0))
-
-    ordered_band_strs = [str(b) for b in band_order]
-    existing = [b for b in ordered_band_strs if b in df_wide.columns]
-    df_wide = df_wide.reindex(columns=existing)
-
-    df_long["band"] = pd.Categorical(df_long["band"], categories=existing, ordered=True)
-    df_long = df_long.sort_values(["band", "importance"], ascending=[True, False]).reset_index(drop=True)
-
-    return df_long, df_wide
-
-def plot_topk_each_band(df_long, topk=12):
-    """
-    Plots top-k features per band. Returns list of matplotlib Figure objects.
-    """
-    figs = []
-    for band in df_long["band"].unique():
-        sub = (df_long[df_long["band"] == band]
-               .sort_values("importance", ascending=False)
-               .head(topk))
-        if sub.empty:
-            continue
-        n = int(sub["n"].iloc[0])
-
-        fig = plt.figure()
-        plt.barh(sub["feature"][::-1], sub["importance"][::-1])
-        plt.title(f"Permutation importance — {band} | n={n}")
-        plt.xlabel("Normalized importance (sums to 1 within band)")
-        plt.tight_layout()
-        figs.append(fig)
-    return figs
-
-
-def plot_heatmap(df_wide, top_features=25, figsize=(10, 6), sort_bands=True):
-    """
-    Heatmap of per-band importances. Bands can be sorted by interval lower bound.
-    Returns matplotlib Figure.
-    """
-    # --- sort x-axis bands (columns) by their numeric lower bound
-    cols = list(df_wide.columns)
-    if sort_bands:
-        col_ser = pd.Series(cols, index=cols).astype(str)
-        lower = pd.to_numeric(
-            col_ser.str.extract(r'[\(\[]\s*([^,]+)\s*,', expand=False),
-            errors="coerce"
-        )
-        cols = list(lower.sort_values(kind="mergesort", na_position="last").index)
-
-    # --- select top features by mean importance across bands
-    avg = df_wide.mean(axis=1).sort_values(ascending=False)
-    sel = avg.head(top_features).index
-    M = df_wide.loc[sel, cols].values
-
-    fig = plt.figure(figsize=figsize)
-    plt.imshow(M, aspect="auto")
-    plt.yticks(range(len(sel)), sel)
-    plt.xticks(range(len(cols)), cols, rotation=0)
-    plt.title("Feature importance by price band" + (" (sorted)" if sort_bands else ""))
-    plt.colorbar(label="Normalized importance")
-    plt.tight_layout()
-    return fig
 
 # -------------------------------------------------------
-# 5.2. Analytics interface for new predictions → 2 functions
+# Analytics interface for new predictions & Outlier analysis → 3 functions
 # -------------------------------------------------------
 
 
@@ -2236,8 +2105,138 @@ def evaluate_model(model, X_train, y_train, X_val, y_val):
     }
 
 
+
 # -------------------------------------------------------
-# 5.3. General vs Segment-Specific Model Performance → 3 functions
+# Feature Importance across price levels → 3 functions
+# -------------------------------------------------------
+
+def importance_by_price_band(model, X, y, q=4, n_repeats=10, seed=42,
+                             scoring="neg_mean_absolute_error",
+                             normalize=True, min_bin_size=200):
+    """
+    Permutation feature importance computed separately within `y` quantile price bands.
+
+    Splits `y` into `q` bands using `pd.qcut` and, for each band with at least
+    `min_bin_size` samples, runs `permutation_importance` on that subset.
+    Importances are clamped to >= 0 and optionally normalized to sum to 1 per band.
+
+    Returns:
+        df_long: Long table with columns [band, feature, importance, n].
+        df_wide: Wide table (index=feature, columns=band) with importances.
+    """
+    
+    if isinstance(X, pd.DataFrame):
+        X_df = X.copy()
+    else:
+        X_df = pd.DataFrame(X)
+        X_df.columns = [f"f{i}" for i in range(X_df.shape[1])]
+
+    y = np.asarray(y).ravel()
+    bands = pd.qcut(pd.Series(y), q=q, duplicates="drop")
+
+    band_order = sorted(bands.cat.categories, key=lambda iv: float(iv.left))
+
+    out = []
+    for band in band_order:
+        idx = (bands == band).to_numpy()
+        n = int(idx.sum())
+        if n < min_bin_size:
+            continue
+
+        Xb = X_df.loc[idx]
+        yb = y[idx]
+
+        pi = permutation_importance(
+            model, Xb, yb,
+            scoring=scoring,
+            n_repeats=n_repeats,
+            random_state=seed,
+            n_jobs=-1
+        )
+
+        imp = np.maximum(pi.importances_mean.astype(float), 0.0)
+        if normalize:
+            s = imp.sum()
+            imp = imp / s if s > 0 else imp
+
+        for f, v in zip(X_df.columns, imp):
+            out.append({"band": str(band), "feature": f, "importance": float(v), "n": n})
+
+    if len(out) == 0:
+        df_long = pd.DataFrame(columns=["band", "feature", "importance", "n"])
+        df_wide = pd.DataFrame(index=X_df.columns)
+        return df_long, df_wide
+
+    df_long = pd.DataFrame(out)
+    df_wide = (df_long.pivot_table(index="feature", columns="band",
+                                   values="importance", aggfunc="mean")
+                      .fillna(0.0))
+
+    ordered_band_strs = [str(b) for b in band_order]
+    existing = [b for b in ordered_band_strs if b in df_wide.columns]
+    df_wide = df_wide.reindex(columns=existing)
+
+    df_long["band"] = pd.Categorical(df_long["band"], categories=existing, ordered=True)
+    df_long = df_long.sort_values(["band", "importance"], ascending=[True, False]).reset_index(drop=True)
+
+    return df_long, df_wide
+
+
+
+def plot_topk_each_band(df_long, topk=12):
+    """
+    Plots top-k features per band. Returns list of matplotlib Figure objects.
+    """
+    figs = []
+    for band in df_long["band"].unique():
+        sub = (df_long[df_long["band"] == band]
+               .sort_values("importance", ascending=False)
+               .head(topk))
+        if sub.empty:
+            continue
+        n = int(sub["n"].iloc[0])
+
+        fig = plt.figure()
+        plt.barh(sub["feature"][::-1], sub["importance"][::-1])
+        plt.title(f"Permutation importance — {band} | n={n}")
+        plt.xlabel("Normalized importance (sums to 1 within band)")
+        plt.tight_layout()
+        figs.append(fig)
+    return figs
+
+
+def plot_heatmap(df_wide, top_features=25, figsize=(10, 6), sort_bands=True):
+    """
+    Heatmap of per-band importances. Bands can be sorted by interval lower bound.
+    Returns matplotlib Figure.
+    """
+    # --- sort x-axis bands (columns) by their numeric lower bound
+    cols = list(df_wide.columns)
+    if sort_bands:
+        col_ser = pd.Series(cols, index=cols).astype(str)
+        lower = pd.to_numeric(
+            col_ser.str.extract(r'[\(\[]\s*([^,]+)\s*,', expand=False),
+            errors="coerce"
+        )
+        cols = list(lower.sort_values(kind="mergesort", na_position="last").index)
+
+    # --- select top features by mean importance across bands
+    avg = df_wide.mean(axis=1).sort_values(ascending=False)
+    sel = avg.head(top_features).index
+    M = df_wide.loc[sel, cols].values
+
+    fig = plt.figure(figsize=figsize)
+    plt.imshow(M, aspect="auto")
+    plt.yticks(range(len(sel)), sel)
+    plt.xticks(range(len(cols)), cols, rotation=0)
+    plt.title("Feature importance by price band" + (" (sorted)" if sort_bands else ""))
+    plt.colorbar(label="Normalized importance")
+    plt.tight_layout()
+    return fig
+
+
+# -------------------------------------------------------
+# General vs Segment-Specific Model Performance → 3 functions
 # -------------------------------------------------------
 
 def _loguniform(rng, low, high):
