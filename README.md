@@ -37,7 +37,8 @@ Results & Methodology: We utilized a blending strategy of five-based models. The
 
 Here is the schema of our project: 
 
-<img width="592" height="1160" alt="image" src="https://github.com/user-attachments/assets/81917291-d4d6-470a-85ec-b54fc6eedd08" />
+![WhatsApp Image 2025-12-19 at 16 37 53](https://github.com/user-attachments/assets/1cd4cbbb-8f8b-45cb-afc1-e23b11d54d6d)
+
 
 
 
